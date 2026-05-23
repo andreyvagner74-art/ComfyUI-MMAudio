@@ -116,7 +116,9 @@ class MMAudioModelLoader:
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
-       
+
+        # Free VRAM from other cached models (Flux, etc.) before loading
+        mm.unload_all_models()
         mm.soft_empty_cache()
 
         base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[base_precision]
@@ -219,6 +221,10 @@ class MMAudioFeatureUtilsLoader:
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
+        # Free VRAM from other cached models before loading MMAudio components
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
 
         #synchformer
@@ -320,6 +326,10 @@ class MMAudioSampler:
     def sample(self, mmaudio_model, seed, feature_utils, duration, steps, cfg, prompt, negative_prompt, mask_away_clip, force_offload, images=None):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+
+        # Free VRAM from other cached models before inference
+        mm.unload_all_models()
+        mm.soft_empty_cache()
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
 
