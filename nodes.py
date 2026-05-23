@@ -235,7 +235,7 @@ class MMAudioFeatureUtilsLoader:
         
         for name, param in synchformer.named_parameters():
             # Set tensor to device
-            set_module_tensor_to_device(synchformer, name, device=device, dtype=dtype, value=synchformer_sd[name])
+            set_module_tensor_to_device(synchformer, name, device=offload_device, dtype=dtype, value=synchformer_sd[name])
 
         #vae
         download_path = folder_paths.get_folder_paths("mmaudio")[0]
@@ -253,7 +253,7 @@ class MMAudioFeatureUtilsLoader:
                     local_dir_use_symlinks=False,
                 )
             
-            bigvgan_vocoder = BigVGANv2.from_pretrained(nvidia_bigvgan_vocoder_path).eval().to(device=device, dtype=dtype)
+            bigvgan_vocoder = BigVGANv2.from_pretrained(nvidia_bigvgan_vocoder_path).eval().to(device=offload_device, dtype=dtype)
         else:
             assert bigvgan_vocoder_model is not None, "bigvgan_vocoder_model must be provided for 16k mode"
             bigvgan_vocoder = bigvgan_vocoder_model
@@ -265,7 +265,7 @@ class MMAudioFeatureUtilsLoader:
             bigvgan_vocoder=bigvgan_vocoder,
             mode=mode
             )
-        vae = vae.eval().to(device=device, dtype=dtype)
+        vae = vae.eval().to(device=offload_device, dtype=dtype)
 
         #clip
        
@@ -284,8 +284,8 @@ class MMAudioFeatureUtilsLoader:
 
         clip_sd = load_torch_file(os.path.join(clip_model_path), device=offload_device)
         for name, param in clip_model.named_parameters():
-            set_module_tensor_to_device(clip_model, name, device=device, dtype=dtype, value=clip_sd[name])
-        clip_model.to(device=device, dtype=dtype)
+            set_module_tensor_to_device(clip_model, name, device=offload_device, dtype=dtype, value=clip_sd[name])
+        clip_model.to(device=offload_device, dtype=dtype)
 
         #clip_model = create_model_from_pretrained("hf-hub:apple/DFN5B-CLIP-ViT-H-14-384", return_transform=False)
         
@@ -330,20 +330,23 @@ class MMAudioSampler:
         # Free VRAM from other cached models before inference
         mm.unload_all_models()
         mm.soft_empty_cache()
+        torch.cuda.empty_cache()
+
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
 
         seq_cfg = mmaudio_model.seq_cfg
        
+        # Process video frames on CPU first to avoid moving huge raw tensor to GPU
         if images is not None:
-            images = images.to(device=device)
             clip_frames, sync_frames, duration = process_video_tensor(images, duration)
-            print("clip_frames", clip_frames.shape, "sync_frames", sync_frames.shape, "duration", duration)
+            log.info(f"clip_frames {clip_frames.shape}, sync_frames {sync_frames.shape}, duration {duration}")
+            del images  # free CPU memory from raw frames
             if mask_away_clip:
                 clip_frames = None
             else:
-                clip_frames = clip_frames.unsqueeze(0)
-            sync_frames = sync_frames.unsqueeze(0)
+                clip_frames = clip_frames.unsqueeze(0).to(device=device)
+            sync_frames = sync_frames.unsqueeze(0).to(device=device)
         else:
             clip_frames = None
             sync_frames = None
@@ -362,10 +365,11 @@ class MMAudioSampler:
                       fm=scheduler,
                       rng=rng,
                       cfg_strength=cfg)
-        if force_offload:
-            mmaudio_model.to(offload_device)
-            feature_utils.to(offload_device)
-            mm.soft_empty_cache()
+        # Always offload to free VRAM for next workflow
+        mmaudio_model.to(offload_device)
+        feature_utils.to(offload_device)
+        mm.soft_empty_cache()
+        torch.cuda.empty_cache()
         waveform = audios.float().cpu()
         #torchaudio.save("test.wav", waveform, 44100)
         audio = {
